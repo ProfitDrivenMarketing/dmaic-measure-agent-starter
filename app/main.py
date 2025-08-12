@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from app.models.schemas import MeasureRequest, MeasureResponse
+from app.schemas import MeasureRequest, MeasureResponse
 from app.bigquery import fetch_actuals
 from app.evaluator import evaluate_metric
 
