@@ -1,10 +1,11 @@
 import os
 from fastapi import FastAPI, HTTPException
-from app.models.schemas import MeasureRequest, MeasureResponse
-from app.adapters.bigquery import fetch_actuals
-from app.adapters.postgres import fetch_targets
-from app.core.evaluator import evaluate_metric
-from app.core.summarizer import summarize
+
+from app.schemas import MeasureRequest, MeasureResponse
+from app.bigquery import fetch_actuals
+from app.postgres import fetch_targets
+from app.evaluator import evaluate_metric
+from app.summarizer import summarize
 
 app = FastAPI()
 
