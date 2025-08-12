@@ -1,51 +1,37 @@
-import os
 from fastapi import FastAPI, HTTPException
-
-from app.schemas import MeasureRequest, MeasureResponse
+from app.models.schemas import MeasureRequest, MeasureResponse
 from app.bigquery import fetch_actuals
-from app.postgres import fetch_targets, fetch_client_bq_config   # <- add this
 from app.evaluator import evaluate_metric
-from app.summarizer import summarize
 
 app = FastAPI()
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
 @app.post("/measure/evaluate", response_model=MeasureResponse)
-def measure(req: MeasureRequest):
+def measure_evaluate(req: MeasureRequest):
+    """
+    Dynamic Measure Evaluation
+    Pulls metrics from BigQuery based on client_id, date range, and metric list.
+    """
     try:
-        # Look up this client's BigQuery config (project, dataset, table_prefix)
-        cfg = fetch_client_bq_config(req.client_id)
-
-        # Pull actuals from BigQuery using the dynamic tables for this client
+        # Get actuals dynamically from BigQuery
         actuals = fetch_actuals(
-            cfg=cfg,
+            client_id=req.client_id,
+            metrics=req.metrics,
             start=req.period_start,
-            end=req.period_end,
-            metrics=req.metrics
+            end=req.period_end
         )
 
-        # Load targets from Postgres
-        targets = fetch_targets(req.client_id, req.metrics, req.period_start, req.period_end)
+        # Evaluate each metric against targets (if provided)
+        results = {}
+        for metric in req.metrics:
+            target = req.targets.get(metric) if req.targets else None
+            results[metric] = evaluate_metric(metric, actuals.get(metric), target)
 
-        # Evaluate metrics against targets
-        evaluations = []
-        for m in req.metrics:
-            actual = float(actuals.get(m, 0.0))
-            evaln = evaluate_metric(m, actual, targets.get(m))
-            evaluations.append(evaln)
-
-        # Summarize
-        score, ovr, insights, exec_sum, slack = summarize(evaluations)
         return MeasureResponse(
-            overall_status=ovr,
-            performance_score=score,
-            evaluations=evaluations,
-            key_insights=insights,
-            executive_summary=exec_sum,
-            slack_message=slack
+            client_id=req.client_id,
+            period_start=req.period_start,
+            period_end=req.period_end,
+            results=results
         )
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
