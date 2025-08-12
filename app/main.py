@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException
 
 from app.schemas import MeasureRequest, MeasureResponse
 from app.bigquery import fetch_actuals
-from app.postgres import fetch_targets
+from app.postgres import fetch_targets, fetch_client_bq_config   # <- add this
 from app.evaluator import evaluate_metric
 from app.summarizer import summarize
 
