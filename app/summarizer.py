@@ -1,4 +1,4 @@
-from app.models.schemas import MeasureResponse, MetricEvaluation, KeyInsight
+from app.schemas import MeasureResponse, MetricEvaluation, KeyInsight
 
 def compute_score(evals):
     score = 100
