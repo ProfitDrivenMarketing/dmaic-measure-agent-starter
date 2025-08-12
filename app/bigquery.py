@@ -1,58 +1,84 @@
-from google.cloud import bigquery
-from google.oauth2 import service_account
-from datetime import date
 from typing import Dict, List
-import os, json
+from google.cloud import bigquery
+from sqlalchemy import create_engine, text
+import os
 
-def fetch_actuals(cfg: Dict[str, str], start: date, end: date, metrics: List[str]) -> Dict[str, float]:
-    bq_project = cfg["bq_project"]
-    bq_dataset = cfg["bq_dataset"]
-    prefix     = cfg["table_prefix"]
+# Global cache for Postgres engine
+_pg_engine = None
 
-    ads_table  = f"google_ads_{prefix}"
-    shop_table = f"shopify_{prefix}"
+def pg_engine():
+    global _pg_engine
+    if _pg_engine is None:
+        _pg_engine = create_engine(os.environ["PG_URI"])
+    return _pg_engine
 
-    sa = os.getenv("GCP_SA_JSON")
-    creds = service_account.Credentials.from_service_account_info(json.loads(sa)) if sa else None
-    client = bigquery.Client(project=bq_project, credentials=creds)
+def get_client_config(client_id: str):
+    """Fetch table_prefix and dataset for the given client from Postgres."""
+    sql = text("""
+        SELECT dataset, dataslayer_config->>'table_prefix' AS table_prefix
+        FROM clients
+        WHERE client_id = :client_id
+    """)
+    with pg_engine().connect() as conn:
+        result = conn.execute(sql, {"client_id": client_id}).mappings().first()
+        if not result:
+            raise ValueError(f"Client '{client_id}' not found in Postgres.")
+        return result["dataset"], result["table_prefix"]
 
-    sql = f"""
-    DECLARE start_date DATE DEFAULT @start_date;
-    DECLARE end_date DATE DEFAULT @end_date;
+def fetch_actuals(client_id: str, metrics: List[str], start: str, end: str) -> Dict[str, float]:
+    """Fetch metrics dynamically for any client using their prefix and dataset."""
+    
+    dataset, table_prefix = get_client_config(client_id)
 
-    WITH ads AS (
-      SELECT DATE(day) AS d, SUM(cost) AS cost
-      FROM `{bq_project}.{bq_dataset}.{ads_table}`
-      WHERE DATE(day) BETWEEN start_date AND end_date
-      GROUP BY d
+    # Build table names dynamically
+    google_ads_table = f"{dataset}.google_ads_{table_prefix}"
+    shopify_table = f"{dataset}.shopify_{table_prefix}"
+
+    client = bigquery.Client()
+
+    # Example query combining Google Ads + Shopify
+    query = f"""
+    WITH google_ads AS (
+        SELECT
+            DATE(Date) AS date,
+            SUM(ReturnonadspendROAS) AS roas,
+            SUM(ConversionValue) AS revenue,
+            SUM(Cost) AS cost
+        FROM `{google_ads_table}`
+        WHERE DATE(Date) BETWEEN @start_date AND @end_date
+        GROUP BY date
     ),
-    shop AS (
-      SELECT DATE(order_date) AS d, SUM(revenue) AS revenue
-      FROM `{bq_project}.{bq_dataset}.{shop_table}`
-      WHERE DATE(order_date) BETWEEN start_date AND end_date
-        AND order_status = 'completed'
-      GROUP BY d
-    ),
-    totals AS (
-      SELECT SUM(ads.cost) AS total_cost, SUM(shop.revenue) AS total_revenue
-      FROM ads FULL OUTER JOIN shop USING (d)
+    shopify AS (
+        SELECT
+            DATE(Date) AS date,
+            SUM(TotalSales) AS shopify_sales
+        FROM `{shopify_table}`
+        WHERE DATE(Date) BETWEEN @start_date AND @end_date
+        GROUP BY date
     )
-    SELECT * FROM totals
+    SELECT
+        COALESCE(ga.date, sh.date) AS date,
+        roas,
+        revenue,
+        cost,
+        shopify_sales
+    FROM google_ads ga
+    FULL OUTER JOIN shopify sh ON ga.date = sh.date
+    ORDER BY date
     """
 
-    job = client.query(
-        sql,
-        job_config=bigquery.QueryJobConfig(query_parameters=[
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
             bigquery.ScalarQueryParameter("start_date", "DATE", start),
-            bigquery.ScalarQueryParameter("end_date", "DATE", end),
-        ]),
+            bigquery.ScalarQueryParameter("end_date", "DATE", end)
+        ]
     )
-    rows = list(job.result())
-    total_cost = float((rows[0]["total_cost"] if rows else 0) or 0)
-    total_revenue = float((rows[0]["total_revenue"] if rows else 0) or 0)
 
-    out: Dict[str, float] = {}
-    if "cost" in metrics: out["cost"] = total_cost
-    if "revenue" in metrics: out["revenue"] = total_revenue
-    if "roas" in metrics: out["roas"] = (total_revenue / total_cost) if total_cost > 0 else 0.0
+    results = client.query(query, job_config=job_config).result()
+
+    out = {}
+    for row in results:
+        for metric in metrics:
+            if metric in row and row[metric] is not None:
+                out[metric] = float(row[metric])
     return out
