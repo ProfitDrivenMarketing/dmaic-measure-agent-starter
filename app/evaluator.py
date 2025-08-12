@@ -1,4 +1,4 @@
-from app.models.schemas import MetricEvaluation
+from app.schemas import MetricEvaluation
 
 def evaluate_metric(name: str, actual: float, target_def) -> MetricEvaluation:
     if not target_def:
