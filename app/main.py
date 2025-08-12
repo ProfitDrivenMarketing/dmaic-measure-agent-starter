@@ -16,21 +16,28 @@ def health():
 @app.post("/measure/evaluate", response_model=MeasureResponse)
 def measure(req: MeasureRequest):
     try:
+        # Look up this client's BigQuery config (project, dataset, table_prefix)
+        cfg = fetch_client_bq_config(req.client_id)
+
+        # Pull actuals from BigQuery using the dynamic tables for this client
         actuals = fetch_actuals(
-            bq_project=os.environ["BQ_PROJECT_ID"],
-            bq_dataset=os.environ["BQ_DATASET"],
-            client_id=req.client_id,
-            start=req.period_start, end=req.period_end,
+            cfg=cfg,
+            start=req.period_start,
+            end=req.period_end,
             metrics=req.metrics
         )
+
+        # Load targets from Postgres
         targets = fetch_targets(req.client_id, req.metrics, req.period_start, req.period_end)
 
+        # Evaluate metrics against targets
         evaluations = []
         for m in req.metrics:
             actual = float(actuals.get(m, 0.0))
             evaln = evaluate_metric(m, actual, targets.get(m))
             evaluations.append(evaln)
 
+        # Summarize
         score, ovr, insights, exec_sum, slack = summarize(evaluations)
         return MeasureResponse(
             overall_status=ovr,
