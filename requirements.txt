@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 pydantic
 google-cloud-bigquery
+google-auth
 psycopg2-binary
 SQLAlchemy
 python-dotenv
