@@ -1,29 +1,50 @@
 from typing import Dict, List
 from datetime import date
-import os, json
+import os, json, re
+
+
+def _safe_ident(s: str) -> str:
+    """
+    Very small guard so a column name/table prefix can't inject SQL.
+    Allows letters, digits, underscore only.
+    """
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", s):
+        raise ValueError(f"Invalid identifier: {s}")
+    return s
 
 
 def fetch_actuals(cfg: Dict[str, str], start: date, end: date, metrics: List[str]) -> Dict[str, float]:
     """
-    Fetch totals for cost/revenue and compute roas.
+    Fetch totals for cost/revenue and compute roas using dynamic column mappings.
 
-    cfg keys required:
+    cfg required:
       - bq_project
       - bq_dataset
       - table_prefix
 
-    BigQuery tables (standardized):
-      - {dataset}.google_ads_{prefix}  with columns: `Date` (YYYY-MM-DD string), `Cost`
-      - {dataset}.shopify_{prefix}     with columns: `Date` (YYYY-MM-DD string), `NetSales`
+    cfg optional overrides:
+      - ads_date_col (default 'Date')
+      - ads_cost_col (default 'Cost')
+      - ads_cost_divisor (default 1)  # set 1e6 if values are in micros
+      - shop_date_col (default 'Date')
+      - shop_revenue_col (default 'TotalSales')  # was NetSales before
     """
     bq_project = cfg["bq_project"]
     bq_dataset = cfg["bq_dataset"]
     prefix     = cfg["table_prefix"]
 
-    ads_table  = f"{bq_project}.{bq_dataset}.google_ads_{prefix}"
-    shop_table = f"{bq_project}.{bq_dataset}.shopify_{prefix}"
+    # Column mappings with safe defaults
+    ads_date_col       = _safe_ident(cfg.get("ads_date_col", "Date"))
+    ads_cost_col       = _safe_ident(cfg.get("ads_cost_col", "Cost"))
+    shop_date_col      = _safe_ident(cfg.get("shop_date_col", "Date"))
+    shop_revenue_col   = _safe_ident(cfg.get("shop_revenue_col", "TotalSales"))
+    ads_cost_divisor   = float(cfg.get("ads_cost_divisor", 1))
 
-    # Import BigQuery libs INSIDE the function so module import never crashes
+    # Build fully qualified tables (dataset.table)
+    ads_table  = f"{bq_project}.{bq_dataset}." + _safe_ident(f"google_ads_{prefix}")
+    shop_table = f"{bq_project}.{bq_dataset}." + _safe_ident(f"shopify_{prefix}")
+
+    # Import BigQuery libs INSIDE the function so app import never crashes
     try:
         from google.cloud import bigquery
         from google.oauth2 import service_account
@@ -35,29 +56,30 @@ def fetch_actuals(cfg: Dict[str, str], start: date, end: date, metrics: List[str
     creds = service_account.Credentials.from_service_account_info(json.loads(sa_json)) if sa_json else None
     client = bigquery.Client(project=bq_project, credentials=creds)
 
-    # Build query (use SAFE.PARSE_DATE and backticks for case-sensitive cols)
+    # Use backticks for case-sensitive column names. Do math with a parameterized divisor.
     sql = f"""
-    DECLARE start_date DATE DEFAULT @start_date;
-    DECLARE end_date   DATE DEFAULT @end_date;
-
     WITH ads_raw AS (
-      SELECT SAFE.PARSE_DATE('%Y-%m-%d', `Date`) AS d, `Cost` AS cost
+      SELECT
+        SAFE.PARSE_DATE('%Y-%m-%d', `{ads_date_col}`) AS d,
+        CAST(`{ads_cost_col}` AS FLOAT64) / @cost_divisor AS cost
       FROM `{ads_table}`
     ),
     ads AS (
       SELECT d, SUM(cost) AS total_cost
       FROM ads_raw
-      WHERE d IS NOT NULL AND d BETWEEN start_date AND end_date
+      WHERE d IS NOT NULL AND d BETWEEN @start_date AND @end_date
       GROUP BY d
     ),
     shop_raw AS (
-      SELECT SAFE.PARSE_DATE('%Y-%m-%d', `Date`) AS d, `NetSales` AS revenue
+      SELECT
+        SAFE.PARSE_DATE('%Y-%m-%d', `{shop_date_col}`) AS d,
+        CAST(`{shop_revenue_col}` AS FLOAT64) AS revenue
       FROM `{shop_table}`
     ),
     shop AS (
       SELECT d, SUM(revenue) AS total_revenue
       FROM shop_raw
-      WHERE d IS NOT NULL AND d BETWEEN start_date AND end_date
+      WHERE d IS NOT NULL AND d BETWEEN @start_date AND @end_date
       GROUP BY d
     ),
     totals AS (
@@ -67,8 +89,7 @@ def fetch_actuals(cfg: Dict[str, str], start: date, end: date, metrics: List[str
       FROM ads
       FULL OUTER JOIN shop USING (d)
     )
-    SELECT total_cost, total_revenue
-    FROM totals
+    SELECT total_cost, total_revenue FROM totals
     """
 
     try:
@@ -77,14 +98,17 @@ def fetch_actuals(cfg: Dict[str, str], start: date, end: date, metrics: List[str
             job_config=bigquery.QueryJobConfig(query_parameters=[
                 bigquery.ScalarQueryParameter("start_date", "DATE", start),
                 bigquery.ScalarQueryParameter("end_date",   "DATE", end),
-            ])
+                bigquery.ScalarQueryParameter("cost_divisor", "FLOAT64", ads_cost_divisor),
+            ]),
         )
         rows = list(job.result())
     except Exception as e:
-        raise RuntimeError(f"BigQuery query failed for prefix='{prefix}' "
-                           f"({bq_project}.{bq_dataset}): {e}")
+        raise RuntimeError(
+            f"BigQuery query failed for prefix='{prefix}' "
+            f"({bq_project}.{bq_dataset}): {e}"
+        )
 
-    total_cost = float((rows[0]["total_cost"] if rows else 0) or 0)
+    total_cost    = float((rows[0]["total_cost"] if rows else 0) or 0)
     total_revenue = float((rows[0]["total_revenue"] if rows else 0) or 0)
 
     out: Dict[str, float] = {}
