@@ -1,3 +1,8 @@
+from typing import Dict, List, Tuple, Optional
+from datetime import date
+from sqlalchemy import create_engine, text
+import os
+
 def fetch_targets(
     client_id: str,
     metrics: List[str],
