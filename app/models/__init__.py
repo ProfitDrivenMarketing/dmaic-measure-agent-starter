@@ -1,5 +1,14 @@
-# Make "app.schemas" importable as an alias of "app.models.schemas"
-import sys
-from .models import schemas as _schemas_module
-sys.modules[__name__ + ".schemas"] = _schemas_module
+# Expose Pydantic models at app.models.*
+from .schemas import (
+    MeasureRequest,
+    MeasureResponse,
+    MetricEvaluation,
+    KeyInsight,
+)
 
+__all__ = [
+    "MeasureRequest",
+    "MeasureResponse",
+    "MetricEvaluation",
+    "KeyInsight",
+]
