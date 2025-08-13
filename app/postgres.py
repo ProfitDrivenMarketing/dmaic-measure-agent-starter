@@ -54,36 +54,34 @@ def fetch_targets(
     """
     Returns a dict keyed by metric_name with tuple:
       (target_type, target_value, lower_bound, upper_bound, currency)
+
+    Works with both schemas:
+      - minimal: metric_name, target_type, target_value
+      - extended: + lower_bound, upper_bound, currency
     """
     targets_tbl = _targets_table_name()
     params = {"client_id": client_id, "metrics": metrics, "start": start, "end": end}
 
-    def _map(rows, with_bounds: bool):
-        out: Dict[str, Tuple[str, Optional[float], Optional[float], Optional[float], Optional[str]]] = {}
-        for r in rows:
-            if with_bounds:
-                out[r["metric_name"]] = (
-                    r["target_type"],
-                    r["target_value"],
-                    r["lower_bound"],
-                    r["upper_bound"],
-                    r.get("currency"),
-                )
-            else:
-                out[r["metric_name"]] = (
-                    r["target_type"],
-                    r["target_value"],
-                    None,  # lower_bound
-                    None,  # upper_bound
-                    None,  # currency
-                )
-        return out
-
     with engine().connect() as conn:
-        # Try new schema with bounds/currency
-        try:
-            sql_new = text(f"""
-                SELECT metric_name, target_type, target_value, lower_bound, upper_bound, currency
+        # 1) Detect if extended columns exist without causing an error/abort
+        col_check = text("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = :tbl
+              AND table_schema = ANY(current_schemas(false))
+              AND column_name IN ('lower_bound','upper_bound','currency')
+        """)
+        cols = {c for c, in conn.execute(col_check, {"tbl": targets_tbl.lower()}).all()}
+        has_bounds = "lower_bound" in cols and "upper_bound" in cols
+        has_currency = "currency" in cols
+
+        # 2) Build the right select
+        if has_bounds or has_currency:
+            sql = text(f"""
+                SELECT metric_name, target_type, target_value,
+                       {"lower_bound" if has_bounds else "NULL AS lower_bound"},
+                       {"upper_bound" if has_bounds else "NULL AS upper_bound"},
+                       {"currency"    if has_currency else "NULL AS currency"}
                 FROM {targets_tbl}
                 WHERE client_id = :client_id
                   AND metric_name = ANY(:metrics)
@@ -91,15 +89,10 @@ def fetch_targets(
                   AND period_end   >= :start
                   AND status = 'ACTIVE'
             """)
-            rows = conn.execute(sql_new, params).mappings().all()
-            return _map(rows, with_bounds=True)
-        except Exception as e:
-            msg = str(e).lower()
-            if "undefinedcolumn" not in msg and "does not exist" not in msg:
-                raise
-            # Fall back to old minimal schema
-            sql_old = text(f"""
-                SELECT metric_name, target_type, target_value
+        else:
+            sql = text(f"""
+                SELECT metric_name, target_type, target_value,
+                       NULL AS lower_bound, NULL AS upper_bound, NULL AS currency
                 FROM {targets_tbl}
                 WHERE client_id = :client_id
                   AND metric_name = ANY(:metrics)
@@ -107,8 +100,19 @@ def fetch_targets(
                   AND period_end   >= :start
                   AND status = 'ACTIVE'
             """)
-            rows = conn.execute(sql_old, params).mappings().all()
-            return _map(rows, with_bounds=False)
+
+        rows = conn.execute(sql, params).mappings().all()
+
+    out: Dict[str, Tuple[str, Optional[float], Optional[float], Optional[float], Optional[str]]] = {}
+    for r in rows:
+        out[r["metric_name"]] = (
+            r["target_type"],
+            r["target_value"],
+            r["lower_bound"],
+            r["upper_bound"],
+            r.get("currency"),
+        )
+    return out
 
 
 # ------------------------------------------------------------
